@@ -3823,13 +3823,24 @@ vm_page_fault(addr_t address, addr_t faultAddress, bool isWrite, bool isExecute,
 
 	if (status < B_OK) {
 		if (!isUser) {
-			dprintf("vm_page_fault: vm_soft_fault returned error '%s' on fault at "
-				"0x%lx, ip 0x%lx, write %d, kernel, exec %d, thread %" B_PRId32 "\n",
-				strerror(status), address, faultAddress, isWrite, isExecute,
-				thread_get_current_thread_id());
-
 			Thread* thread = thread_get_current_thread();
-			if (thread != NULL && thread->fault_handler != 0) {
+			const bool handled = thread != NULL && thread->fault_handler != 0;
+			// B_BUSY at a fault handler is an expected, retried outcome
+			if (status != B_BUSY || !handled) {
+				dprintf("vm_page_fault: vm_soft_fault returned error '%s' on fault at "
+					"0x%lx, ip 0x%lx, write %d, kernel, exec %d, thread %" B_PRId32
+					" team \"%s\" waits %d\n",
+					strerror(status), address, faultAddress, isWrite, isExecute,
+					thread_get_current_thread_id(),
+					thread != NULL && thread->team != NULL
+						? thread->team->Name() : "?",
+					thread != NULL ? thread->page_fault_waits_allowed : -1);
+			}
+			if (handled) {
+				// Hand the real status to whoever installed the fault handler:
+				// a busy page has to be retried, not reported as a bad address.
+				thread->fault_handler_status = status;
+
 				// this will cause the arch dependant page fault handler to
 				// modify the IP on the interrupt frame or whatever to return
 				// to this address
@@ -4908,8 +4919,14 @@ user_memcpy(void* to, const void* from, size_t size)
 	if (!validate_memory_range(to, size) || !validate_memory_range(from, size))
 		return B_BAD_ADDRESS;
 
-	if (arch_cpu_user_memcpy(to, from, size) < B_OK)
-		return B_BAD_ADDRESS;
+	Thread* thread = thread_get_current_thread();
+	thread->fault_handler_status = B_BAD_ADDRESS;
+	if (arch_cpu_user_memcpy(to, from, size) < B_OK) {
+		// Only B_BUSY may pass through: other fault statuses would change
+		// the errno callers have always seen for plain bad addresses.
+		return thread->fault_handler_status == B_BUSY
+			? B_BUSY : B_BAD_ADDRESS;
+	}
 
 	return B_OK;
 }
@@ -4960,8 +4977,13 @@ user_memset(void* s, char c, size_t count)
 	if (!validate_memory_range(s, count))
 		return B_BAD_ADDRESS;
 
-	if (arch_cpu_user_memset(s, c, count) < B_OK)
-		return B_BAD_ADDRESS;
+	Thread* thread = thread_get_current_thread();
+	thread->fault_handler_status = B_BAD_ADDRESS;
+	if (arch_cpu_user_memset(s, c, count) < B_OK) {
+		// Only B_BUSY may pass through, as in user_memcpy() above.
+		return thread->fault_handler_status == B_BUSY
+			? B_BUSY : B_BAD_ADDRESS;
+	}
 
 	return B_OK;
 }

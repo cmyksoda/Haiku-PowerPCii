@@ -287,6 +287,9 @@ struct Thread : TeamThreadIteratorEntry<thread_id>, KernelReferenceable {
 
 	void			(*fault_handler)(void);
 	jmp_buf			fault_handler_state;
+	status_t		fault_handler_status;
+		/* status of the fault that invoked fault_handler; lets user_memcpy()
+		   report e.g. B_BUSY instead of collapsing everything to B_BAD_ADDRESS */
 	int16			page_faults_allowed;
 	int16			page_fault_waits_allowed;
 

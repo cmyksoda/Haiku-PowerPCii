@@ -380,13 +380,24 @@ DataContainer::_DoCacheIO(off_t offset, uint8* buffer, ssize_t length,
 	cache_put_pages(fCache, rounded_offset, rounded_len, pages, error == B_OK);
 
 	if (error == B_BUSY && retriesAllowed) {
-		// See comment in the file_cache's cache_io() routine.
-		if (user) {
+		// See comment in the file_cache's cache_io() routine. A write's buffer
+		// is the source of the data, so it may only be touched read-only.
+		error = B_OK;
+		if (isWrite) {
+			const addr_t end = (addr_t)buffer + length;
+			for (addr_t address = (addr_t)buffer;
+					address < end && error == B_OK;
+					address = ROUNDDOWN(address, B_PAGE_SIZE) + B_PAGE_SIZE) {
+				if (user) {
+					uint8 byte;
+					error = user_memcpy(&byte, (void*)address, 1);
+				} else
+					(void)*(volatile uint8*)address;
+			}
+		} else if (user) {
 			error = user_memset(buffer, 0, length);
-		} else {
+		} else
 			memset(buffer, 0, length);
-			error = B_OK;
-		}
 		if (error == B_OK) {
 			size_t processed;
 			error = _DoCacheIO(offset, buffer, length, &processed, isWrite, false);

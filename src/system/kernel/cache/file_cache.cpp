@@ -36,6 +36,9 @@
 #	define TRACE(x) ;
 #endif
 
+// Tanka: rig instrumentation for the busy-page retry, drop when upstreaming.
+#define TRACE_BUSY_RETRIES 1
+
 // maximum number of iovecs per request
 #define MAX_IO_VECS			32	// 128 kB
 
@@ -449,9 +452,13 @@ read_into_cache(file_cache_ref* ref, void* cookie, off_t offset,
 		if (useBuffer && bufferSize != 0) {
 			size_t bytes = min_c(bufferSize, (size_t)B_PAGE_SIZE - pageOffset);
 
-			vm_memcpy_from_physical((void*)buffer,
+			// A failure here must not be dropped: the caller would report a
+			// successful read of data that never reached the buffer.
+			status = vm_memcpy_from_physical((void*)buffer,
 				pages[i]->physical_page_number * B_PAGE_SIZE + pageOffset,
 				bytes, IS_USER_ADDRESS(buffer));
+			if (status != B_OK)
+				break;
 
 			buffer += bytes;
 			bufferSize -= bytes;
@@ -459,7 +466,9 @@ read_into_cache(file_cache_ref* ref, void* cookie, off_t offset,
 		}
 	}
 
-	reserve_pages(ref, reservation, reservePages, false);
+	if (status == B_OK)
+		reserve_pages(ref, reservation, reservePages, false);
+
 	cache->Lock();
 
 	// make the pages accessible in the cache
@@ -475,7 +484,7 @@ read_into_cache(file_cache_ref* ref, void* cookie, off_t offset,
 		DEBUG_PAGE_ACCESS_END(pages[i]);
 	}
 
-	return B_OK;
+	return status;
 }
 
 
@@ -611,9 +620,12 @@ write_to_cache(file_cache_ref* ref, void* cookie, off_t offset,
 			generic_size_t(vecs[i].length - pageOffset));
 
 		if (useBuffer) {
-			// copy data from user buffer
-			vm_memcpy_to_physical(base + pageOffset, (void*)buffer, bytes,
-				IS_USER_ADDRESS(buffer));
+			// copy data from user buffer; a failure must not be dropped, or the
+			// caller would report having written data it never got
+			status = vm_memcpy_to_physical(base + pageOffset, (void*)buffer,
+				bytes, IS_USER_ADDRESS(buffer));
+			if (status != B_OK)
+				break;
 		} else {
 			// clear buffer instead
 			vm_memset_physical(base + pageOffset, 0, bytes);
@@ -825,8 +837,10 @@ do_cache_io(void* _cacheRef, void* cookie, off_t offset, addr_t buffer,
 				buffer, useBuffer, pageOffset, bytesLeft, reservePages,
 				lastOffset, lastBuffer, lastPageOffset, lastLeft,
 				lastReservedPages, &reservation);
-			if (status != B_OK)
+			if (status != B_OK) {
+				*_size = size - lastLeft;
 				return status;
+			}
 
 			// Since satisfy_cache_io() unlocks the cache, we need to look up
 			// the page again.
@@ -857,16 +871,17 @@ do_cache_io(void* _cacheRef, void* cookie, off_t offset, addr_t buffer,
 					= (phys_addr_t)page->physical_page_number * B_PAGE_SIZE
 						+ pageOffset;
 				bool userBuffer = IS_USER_ADDRESS(buffer);
+				status_t copyStatus = B_OK;
 				if (doWrite) {
 					if (useBuffer) {
-						vm_memcpy_to_physical(pageAddress, (void*)buffer,
-							bytesInPage, userBuffer);
+						copyStatus = vm_memcpy_to_physical(pageAddress,
+							(void*)buffer, bytesInPage, userBuffer);
 					} else {
 						vm_memset_physical(pageAddress, 0, bytesInPage);
 					}
 				} else if (useBuffer) {
-					vm_memcpy_from_physical((void*)buffer, pageAddress,
-						bytesInPage, userBuffer);
+					copyStatus = vm_memcpy_from_physical((void*)buffer,
+						pageAddress, bytesInPage, userBuffer);
 				}
 
 				locker.Lock();
@@ -883,6 +898,13 @@ do_cache_io(void* _cacheRef, void* cookie, off_t offset, addr_t buffer,
 				}
 
 				cache->MarkPageUnbusy(page);
+
+				if (copyStatus != B_OK) {
+					// Report only what was transferred before the fault, so
+					// that cache_io() can retry the rest (e.g. on B_BUSY).
+					*_size = size - bytesLeft;
+					return copyStatus;
+				}
 			}
 
 			// If it is cached only, requeue the page, so the respective queue
@@ -930,15 +952,56 @@ do_cache_io(void* _cacheRef, void* cookie, off_t offset, addr_t buffer,
 				buffer, useBuffer, pageOffset, bytesLeft, reservePages,
 				lastOffset, lastBuffer, lastPageOffset, lastLeft,
 				lastReservedPages, &reservation);
-			if (status != B_OK)
+			if (status != B_OK) {
+				*_size = size - lastLeft;
 				return status;
+			}
 		}
 	}
 
 	// fill the last remaining bytes of the request (either write or read)
 
-	return function(ref, cookie, lastOffset, lastPageOffset, lastBuffer,
-		lastLeft, useBuffer, &reservation, 0);
+	status_t status = function(ref, cookie, lastOffset, lastPageOffset,
+		lastBuffer, lastLeft, useBuffer, &reservation, 0);
+	if (status != B_OK)
+		*_size = size - lastLeft;
+
+	return status;
+}
+
+
+/*!	Faults the I/O buffer's pages in, so that the retried transfer doesn't have
+	to wait for any of them. A write's buffer is the source of the data, so it
+	may only be touched read-only; zeroing it would destroy the caller's data.
+*/
+static status_t
+fault_in_buffer(addr_t buffer, size_t size, bool doWrite)
+{
+	const bool isUser = IS_USER_ADDRESS(buffer);
+
+	if (!doWrite) {
+		if (isUser)
+			return user_memset((void*)buffer, 0, size);
+
+		memset((void*)buffer, 0, size);
+		return B_OK;
+	}
+
+	const addr_t end = buffer + size;
+	for (addr_t address = buffer; address < end;
+			address = ROUNDDOWN(address, B_PAGE_SIZE) + B_PAGE_SIZE) {
+		if (!isUser) {
+			(void)*(volatile uint8*)address;
+			continue;
+		}
+
+		uint8 byte;
+		status_t status = user_memcpy(&byte, (void*)address, 1);
+		if (status != B_OK)
+			return status;
+	}
+
+	return B_OK;
 }
 
 
@@ -946,7 +1009,7 @@ static status_t
 cache_io(void* ref, void* cookie, off_t offset, addr_t buffer,
 	size_t* _size, bool doWrite)
 {
-	size_t originalSize = *_size;
+	const size_t originalSize = *_size;
 
 	thread_get_current_thread()->page_fault_waits_allowed--;
 	status_t status = do_cache_io(ref, cookie, offset, buffer, _size, doWrite);
@@ -956,26 +1019,34 @@ cache_io(void* ref, void* cookie, off_t offset, addr_t buffer,
 		// This likely means that fault handler would've needed to wait for a page,
 		// but we can't allow that here because it could be one of our pages that
 		// it would've waited on, which would cause a deadlock.
-		// Call memset so that all pages are faulted in, and retry.
-		off_t retryOffset = offset;
-		addr_t retryBuffer = buffer;
-		size_t retrySize = originalSize;
-		if (*_size != originalSize) {
-			retryOffset += *_size;
-			retryBuffer += *_size;
-			retrySize -= *_size;
+		// Fault the buffer in so that it can't happen again, and retry.
+		const size_t completed = min_c(*_size, originalSize);
+		const off_t retryOffset = offset + completed;
+		const addr_t retryBuffer = buffer + completed;
+		size_t retrySize = originalSize - completed;
+
+		*_size = completed;
+
+#if TRACE_BUSY_RETRIES
+		static int32 sBusyRetries = 0;
+		int32 retryCount = atomic_add(&sBusyRetries, 1);
+		if (retryCount < 16 || (retryCount % 64) == 0) {
+			dprintf("file_cache: busy retry #%" B_PRId32 ": %s at %" B_PRIdOFF
+				", %" B_PRIuSIZE " of %" B_PRIuSIZE " bytes done\n", retryCount,
+				doWrite ? "write" : "read", offset, completed, originalSize);
 		}
-		if (IS_USER_ADDRESS(buffer)) {
-			status = user_memset((void*)retryBuffer, 0, retrySize);
-		} else {
-			memset((void*)retryBuffer, 0, retrySize);
-			status = B_OK;
-		}
+#endif
+
+		if (retrySize == 0)
+			return B_OK;
+
+		status = fault_in_buffer(retryBuffer, retrySize, doWrite);
 		if (status == B_OK) {
 			thread_get_current_thread()->page_fault_waits_allowed--;
-			status = do_cache_io(ref, cookie, retryOffset, retryBuffer, &retrySize, doWrite);
-			*_size += retrySize;
+			status = do_cache_io(ref, cookie, retryOffset, retryBuffer,
+				&retrySize, doWrite);
 			thread_get_current_thread()->page_fault_waits_allowed++;
+			*_size = completed + retrySize;
 		}
 	}
 
