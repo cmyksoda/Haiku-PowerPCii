@@ -177,6 +177,9 @@ AddDriversToPackage bus :
 AddDriversToPackage disk :
 	wii_sd@ppc
 	;
+AddDriversToPackage input :
+	wii_gecko@ppc
+	;
 AddDriversToPackage disk virtual :
 	nbd
 	;
@@ -425,6 +428,7 @@ AddFilesToPackage add-ons Network\ Settings :
 #PPCTEMP 	: /boot/system/apps/DiskUsage : DiskUsage ;
 
 AddFilesToPackage add-ons input_server devices :
+	<input>gecko@ppc
 	<input>keyboard
 	<input>mouse
 	<input>tablet

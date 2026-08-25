@@ -1,0 +1,7 @@
+SubDir HAIKU_TOP src add-ons input_server devices gecko ;
+
+UsePrivateHeaders input shared ;
+
+Addon <input>gecko :
+	GeckoInputDevice.cpp
+	: be input_server [ TargetLibsupc++ ] ;

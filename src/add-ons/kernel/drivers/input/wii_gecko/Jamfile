@@ -1,0 +1,8 @@
+SubDir HAIKU_TOP src add-ons kernel drivers input wii_gecko ;
+
+UsePrivateKernelHeaders ;
+UsePrivateHeaders input ;
+
+KernelAddon wii_gecko :
+	wii_gecko.cpp
+	;
