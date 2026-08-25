@@ -7,6 +7,11 @@
 
 #include <KernelExport.h>
 #include <arch/cpu.h>
+#include <debug.h>
+
+#include <string.h>
+
+#include <wii_gecko_input.h>
 
 
 // EXI channel 0 device 1 is the RTC/SRAM/UART chip. The RTC is a free-running
@@ -44,9 +49,24 @@
 #define EXI_TRANSFER_TIMEOUT	100000
 
 
+// Console bytes set aside while looking for an input frame. Only the kernel
+// debugger ever reads them, so a short ring is plenty.
+#define GECKO_CONSOLE_RING_SIZE	64
+
+
 static addr_t sEXIBase;
 static uint32 sCounterBias;
 static bool sInitialized;
+
+static spinlock sGeckoLock = B_SPINLOCK_INITIALIZER;
+
+static char sConsoleRing[GECKO_CONSOLE_RING_SIZE];
+static uint32 sConsoleHead;
+static uint32 sConsoleTail;
+
+static uint8 sFrame[WII_GECKO_FRAME_SIZE - 2];
+static uint32 sFrameLength;
+static uint32 sFrameState;
 
 
 static inline volatile uint32 *
@@ -218,6 +238,100 @@ usbgecko_receive_byte(char* _c)
 }
 
 
+static void
+gecko_console_push(char c)
+{
+	uint32 next = (sConsoleHead + 1) % GECKO_CONSOLE_RING_SIZE;
+	if (next == sConsoleTail)
+		return;
+
+	sConsoleRing[sConsoleHead] = c;
+	sConsoleHead = next;
+}
+
+
+/*!	Splits one received byte into console text and host input frames; returns
+	true once \a _packet holds a complete, checksummed event.
+*/
+static bool
+gecko_demux(char c, wii_gecko_input_packet* _packet)
+{
+	switch (sFrameState) {
+		case 0:
+			if ((uint8)c == WII_GECKO_FRAME_ESCAPE)
+				sFrameState = 1;
+			else
+				gecko_console_push(c);
+			return false;
+
+		case 1:
+			if (c == WII_GECKO_FRAME_TAG) {
+				sFrameState = 2;
+				sFrameLength = 0;
+				return false;
+			}
+
+			// Not a frame after all, so the escape was console text.
+			gecko_console_push((char)WII_GECKO_FRAME_ESCAPE);
+			if ((uint8)c == WII_GECKO_FRAME_ESCAPE)
+				return false;
+
+			gecko_console_push(c);
+			sFrameState = 0;
+			return false;
+
+		default:
+		{
+			sFrame[sFrameLength++] = (uint8)c;
+			if (sFrameLength < sizeof(sFrame))
+				return false;
+
+			sFrameState = 0;
+
+			uint8 checksum = WII_GECKO_CHECKSUM_SEED;
+			for (uint32 i = 0; i < sizeof(sFrame) - 1; i++)
+				checksum ^= sFrame[i];
+			if (checksum != sFrame[sizeof(sFrame) - 1])
+				return false;
+
+			_packet->type = sFrame[0];
+			memcpy(_packet->data, sFrame + 1, sizeof(_packet->data));
+			return _packet->type != WII_GECKO_INPUT_NOP;
+		}
+	}
+}
+
+
+/*!	Non-blocking drain for the input driver. The debug console shares this EXI
+	channel, hence the lock around each single byte transaction.
+*/
+bool
+wii_gecko_input_poll(wii_gecko_input_packet* packet)
+{
+	if (sEXIBase == 0)
+		return false;
+
+	for (int i = 0; i < GECKO_CONSOLE_RING_SIZE; i++) {
+		char c;
+		cpu_status state = disable_interrupts();
+		acquire_spinlock(&sGeckoLock);
+
+		bool received = usbgecko_receive_byte(&c);
+		bool complete = received && gecko_demux(c, packet);
+
+		release_spinlock(&sGeckoLock);
+		restore_interrupts(state);
+
+		if (!received)
+			return false;
+		if (complete)
+			return true;
+	}
+
+	return false;
+}
+
+
 status_t
 wii_serial_debug_init(void)
 {
@@ -236,10 +350,24 @@ wii_serial_debug_put_char(char c)
 	if (sEXIBase == 0)
 		return;
 
+	// The input driver polls the same channel from an ordinary thread; inside
+	// the debugger nothing else runs, and taking the lock could deadlock.
+	cpu_status state = 0;
+	bool locked = !debug_debugger_running();
+	if (locked) {
+		state = disable_interrupts();
+		acquire_spinlock(&sGeckoLock);
+	}
+
 	// Bounded retry: the adapter's FIFO drains at USB pace mid-burst.
 	for (int i = 0; i < 10000; i++) {
 		if (usbgecko_send_byte(c))
 			break;
+	}
+
+	if (locked) {
+		release_spinlock(&sGeckoLock);
+		restore_interrupts(state);
 	}
 }
 
@@ -250,9 +378,18 @@ wii_serial_debug_get_char(void)
 	if (sEXIBase == 0)
 		return 0;
 
-	// The kernel debugger expects a blocking read.
-	char c;
-	while (!usbgecko_receive_byte(&c))
-		;
-	return c;
+	// Debugger context only, so no lock: input frames arriving here are
+	// decoded and dropped rather than typed into the command line.
+	for (;;) {
+		if (sConsoleTail != sConsoleHead) {
+			char c = sConsoleRing[sConsoleTail];
+			sConsoleTail = (sConsoleTail + 1) % GECKO_CONSOLE_RING_SIZE;
+			return c;
+		}
+
+		char c;
+		wii_gecko_input_packet packet;
+		if (usbgecko_receive_byte(&c))
+			gecko_demux(c, &packet);
+	}
 }
