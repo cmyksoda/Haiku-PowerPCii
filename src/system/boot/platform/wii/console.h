@@ -13,6 +13,7 @@
 
 void ctype_init(void);
 void video_init(void);
+void video_apply_overscan(void);
 GXRModeObj* video_mode(void);
 void* video_frame_buffer(void);
 

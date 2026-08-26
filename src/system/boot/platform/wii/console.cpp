@@ -8,6 +8,7 @@
 #include <boot/stdio.h>
 #include <boot/stage2.h>
 #include <boot/menu.h>
+#include <drivers/driver_settings.h>
 #include <string.h>
 
 #include <gccore.h>
@@ -24,7 +25,13 @@ extern "C" void* SYS_AllocArena2MemLo(u32 size, u32 align);
 FILE *stdin, *stdout, *stderr;
 
 static GXRModeObj *sVideoMode;
+static GXRModeObj sOverscanMode;
 static void *sFrameBuffer;
+
+static const int kMaxOverscan = 48;
+	// fbWidth has to stay a multiple of 16, and viYOrigin/viHeight even
+static const int kOverscanGranularityX = 8;
+static const int kOverscanGranularityY = 2;
 
 
 class Console : public ConsoleNode {
@@ -137,6 +144,85 @@ void*
 video_frame_buffer(void)
 {
 	return sFrameBuffer;
+}
+
+
+//! The loader stubs out strtoul(), so the decimal is parsed by hand here.
+static int
+overscan_parameter(void *settings, const char *key, int granularity)
+{
+	const char *value = get_driver_parameter(settings, key, "0", "0");
+	if (value == NULL)
+		return 0;
+
+	int pixels = 0;
+	for (; *value >= '0' && *value <= '9'; value++)
+		pixels = pixels * 10 + (*value - '0');
+
+	if (pixels > kMaxOverscan)
+		pixels = kMaxOverscan;
+
+	return pixels - pixels % granularity;
+}
+
+
+/*!	Insets the picture so a CRT's overscan cannot swallow the Deskbar. The VI
+	is programmed once and the kernel never touches it again, so this is the
+	last chance to change the geometry the desktop is built for.
+*/
+void
+video_apply_overscan(void)
+{
+	if (sVideoMode == NULL || !gKernelArgs.frame_buffer.enabled)
+		return;
+
+	void *settings = load_driver_settings("wii_video");
+	if (settings == NULL)
+		return;
+
+	int insetX = overscan_parameter(settings, "overscan_x",
+		kOverscanGranularityX);
+	int insetY = overscan_parameter(settings, "overscan_y",
+		kOverscanGranularityY);
+	unload_driver_settings(settings);
+
+	if (insetX == 0 && insetY == 0)
+		return;
+
+	sOverscanMode = *sVideoMode;
+	sOverscanMode.fbWidth -= 2 * insetX;
+	sOverscanMode.viWidth -= 2 * insetX;
+	sOverscanMode.viXOrigin += insetX;
+	sOverscanMode.xfbHeight -= 2 * insetY;
+	sOverscanMode.viHeight -= 2 * insetY;
+	sOverscanMode.viYOrigin += insetY;
+	sVideoMode = &sOverscanMode;
+
+	VIDEO_ClearFrameBuffer(sVideoMode, sFrameBuffer, COLOR_BLACK);
+	VIDEO_Configure(sVideoMode);
+	VIDEO_SetNextFramebuffer(sFrameBuffer);
+	VIDEO_SetBlack(FALSE);
+	VIDEO_Flush();
+	VIDEO_WaitVSync();
+	if ((sVideoMode->viTVMode & VI_NON_INTERLACE) != 0)
+		VIDEO_WaitVSync();
+
+	// the console's stride came from the old mode, so re-lay it out
+	CON_Init(sFrameBuffer, 20, 20, sVideoMode->fbWidth, sVideoMode->xfbHeight,
+		sVideoMode->fbWidth * VI_DISPLAY_PIX_SZ);
+
+	uint32 width = sVideoMode->fbWidth;
+	uint32 height = sVideoMode->xfbHeight;
+
+	gKernelArgs.frame_buffer.width = width;
+	gKernelArgs.frame_buffer.height = height;
+	gKernelArgs.frame_buffer.bytes_per_row = width * 4;
+	gKernelArgs.frame_buffer.physical_buffer.size = width * height * 4;
+	gKernelArgs.arch_args.wii_hardware_framebuffer.size
+		= width * height * VI_DISPLAY_PIX_SZ;
+
+	dprintf("frame buffer overscan: %d/%d per side, frame buffer: %" B_PRIu32
+		"x%" B_PRIu32 "\n", insetX, insetY, width, height);
 }
 
 

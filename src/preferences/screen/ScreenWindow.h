@@ -43,6 +43,7 @@ public:
 private:
 			void			_BuildSupportedColorSpaces();
 
+			bool			_ModeNeedsApplying();
 			void			_CheckApplyEnabled();
 			void			_CheckResolutionMenu();
 			void			_CheckColorMenu();
@@ -62,6 +63,15 @@ private:
 
 			status_t		_WriteVesaModeFile(const screen_mode& mode) const;
 			bool			_IsVesa() const { return fIsVesa; }
+
+#ifdef __powerpc__
+			void			_UpdateOverscanControls();
+			void			_SetOverscan(int32 x, int32 y);
+			int32			_OverscanX() const;
+			int32			_OverscanY() const;
+			status_t		_ReadOverscanFile(int32& x, int32& y) const;
+			status_t		_WriteOverscanFile(int32 x, int32 y) const;
+#endif
 
 private:
 			ScreenSettings*	fSettings;
@@ -97,6 +107,17 @@ private:
 			BMenuField*		fTVStandardField;
 
 			BSlider*		fBrightnessSlider;
+
+#ifdef __powerpc__
+			BSlider*		fOverscanXSlider;
+			BSlider*		fOverscanYSlider;
+			int32			fNativeWidth;
+			int32			fNativeHeight;
+			int32			fOriginalOverscanX;
+			int32			fOriginalOverscanY;
+			int32			fAppliedOverscanX;
+			int32			fAppliedOverscanY;
+#endif
 
 			BButton*		fDefaultsButton;
 			BButton*		fApplyButton;

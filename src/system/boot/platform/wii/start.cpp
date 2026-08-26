@@ -67,6 +67,9 @@ get_kernel_entry(void)
 extern "C" void
 platform_start_kernel(void)
 {
+	// only now are the boot volume's driver settings loaded
+	video_apply_overscan();
+
 	addr_t kernelEntry = get_kernel_entry();
 	addr_t stackTop = gKernelArgs.cpu_kstack[0].start
 		+ gKernelArgs.cpu_kstack[0].size;

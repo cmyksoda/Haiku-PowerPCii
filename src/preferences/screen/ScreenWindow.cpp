@@ -28,6 +28,7 @@
 #include <Catalog.h>
 #include <ControlLook.h>
 #include <Directory.h>
+#include <Entry.h>
 #include <File.h>
 #include <FindDirectory.h>
 #include <InterfaceDefs.h>
@@ -45,6 +46,8 @@
 #include <String.h>
 #include <StringView.h>
 #include <Window.h>
+
+#include <driver_settings.h>
 
 #include <InterfacePrivate.h>
 
@@ -72,6 +75,31 @@
 
 
 const char* kBackgroundsSignature = "application/x-vnd.Haiku-Backgrounds";
+
+#ifdef __powerpc__
+// The Wii's video mode is fixed once the boot loader has programmed the video
+// interface, so the desktop can only be inset at the next boot.
+static const uint32 kMsgOverscanXChanged = 'ovsx';
+static const uint32 kMsgOverscanYChanged = 'ovsy';
+static const char* kOverscanSettingsName = "wii_video";
+static const int32 kMaxOverscan = 48;
+static const int32 kOverscanStepX = 8;
+	// keeps the scanout width a multiple of 16
+static const int32 kOverscanStepY = 2;
+	// keeps the interlaced field parity
+
+
+static int32
+clamp_overscan(int32 pixels, int32 step)
+{
+	if (pixels < 0)
+		pixels = 0;
+	if (pixels > kMaxOverscan)
+		pixels = kMaxOverscan;
+
+	return pixels - pixels % step;
+}
+#endif	// __powerpc__
 
 // list of officially supported colour spaces
 static const struct {
@@ -246,6 +274,33 @@ ScreenWindow::ScreenWindow(ScreenSettings* settings)
 		fBrightnessSlider->Hide();
 		fOriginalBrightness = -1;
 	}
+
+#ifdef __powerpc__
+	// overscan sliders: the size the loader will build the desktop at
+	_ReadOverscanFile(fOriginalOverscanX, fOriginalOverscanY);
+	fAppliedOverscanX = fOriginalOverscanX;
+	fAppliedOverscanY = fOriginalOverscanY;
+	fNativeWidth = screen.Frame().IntegerWidth() + 1 + 2 * fOriginalOverscanX;
+	fNativeHeight = screen.Frame().IntegerHeight() + 1 + 2 * fOriginalOverscanY;
+
+	fOverscanXSlider = new BSlider("overscanX", NULL, NULL, 0,
+		kMaxOverscan / kOverscanStepX, B_HORIZONTAL);
+	fOverscanXSlider->SetModificationMessage(
+		new BMessage(kMsgOverscanXChanged));
+	fOverscanXSlider->SetValue(fOriginalOverscanX / kOverscanStepX);
+
+	fOverscanYSlider = new BSlider("overscanY", NULL, NULL, 0,
+		kMaxOverscan / kOverscanStepY, B_HORIZONTAL);
+	fOverscanYSlider->SetModificationMessage(
+		new BMessage(kMsgOverscanYChanged));
+	fOverscanYSlider->SetValue(fOriginalOverscanY / kOverscanStepY);
+
+	BStringView* overscanNote = new BStringView("overscan note",
+		B_TRANSLATE("Takes effect after restart"));
+	overscanNote->SetAlignment(B_ALIGN_CENTER);
+
+	_UpdateOverscanControls();
+#endif
 
 	// box on the left below the screen box with workspaces
 
@@ -577,6 +632,16 @@ ScreenWindow::ScreenWindow(ScreenSettings* settings)
 			.Add(fTVStandardField->CreateLabelLayoutItem(), 0, 6)
 			.Add(fTVStandardField->CreateMenuBarLayoutItem(), 1, 6)
 		.End();
+
+#ifdef __powerpc__
+	BLayoutBuilder::Group<>(outerControlsView)
+		.AddGroup(B_VERTICAL, 0)
+			.AddStrut(B_USE_DEFAULT_SPACING)
+			.Add(fOverscanXSlider)
+			.Add(fOverscanYSlider)
+			.Add(overscanNote)
+		.End();
+#endif
 
 	// TODO: we don't support getting the screen's preferred settings
 	/* fDefaultsButton = new BButton(buttonRect, "DefaultsButton", "Defaults",
@@ -1210,6 +1275,17 @@ ScreenWindow::MessageReceived(BMessage* message)
 			screen.SetBrightness(fOriginalBrightness);
 			fBrightnessSlider->SetValue(fOriginalBrightness * 255);
 
+#ifdef __powerpc__
+			if ((fAppliedOverscanX != fOriginalOverscanX
+					|| fAppliedOverscanY != fOriginalOverscanY)
+				&& _WriteOverscanFile(fOriginalOverscanX, fOriginalOverscanY)
+					== B_OK) {
+				fAppliedOverscanX = fOriginalOverscanX;
+				fAppliedOverscanY = fOriginalOverscanY;
+			}
+			_SetOverscan(fOriginalOverscanX, fOriginalOverscanY);
+#endif
+
 			_UpdateActiveMode();
 			break;
 		}
@@ -1235,6 +1311,14 @@ ScreenWindow::MessageReceived(BMessage* message)
 			_CheckApplyEnabled();
 			break;
 		}
+
+#ifdef __powerpc__
+		case kMsgOverscanXChanged:
+		case kMsgOverscanYChanged:
+			_UpdateOverscanControls();
+			_CheckApplyEnabled();
+			break;
+#endif
 
 		default:
 			BWindow::MessageReceived(message);
@@ -1273,6 +1357,114 @@ ScreenWindow::_WriteVesaModeFile(const screen_mode& mode) const
 }
 
 
+#ifdef __powerpc__
+
+
+int32
+ScreenWindow::_OverscanX() const
+{
+	return fOverscanXSlider->Value() * kOverscanStepX;
+}
+
+
+int32
+ScreenWindow::_OverscanY() const
+{
+	return fOverscanYSlider->Value() * kOverscanStepY;
+}
+
+
+void
+ScreenWindow::_SetOverscan(int32 x, int32 y)
+{
+	fOverscanXSlider->SetValue(x / kOverscanStepX);
+	fOverscanYSlider->SetValue(y / kOverscanStepY);
+
+	_UpdateOverscanControls();
+}
+
+
+void
+ScreenWindow::_UpdateOverscanControls()
+{
+	BString label;
+	label.SetToFormat(B_TRANSLATE("Horizontal size: %" B_PRId32 " pixels"),
+		fNativeWidth - 2 * _OverscanX());
+	fOverscanXSlider->SetLabel(label.String());
+
+	label.SetToFormat(B_TRANSLATE("Vertical size: %" B_PRId32 " pixels"),
+		fNativeHeight - 2 * _OverscanY());
+	fOverscanYSlider->SetLabel(label.String());
+}
+
+
+status_t
+ScreenWindow::_ReadOverscanFile(int32& x, int32& y) const
+{
+	x = 0;
+	y = 0;
+
+	void* handle = load_driver_settings(kOverscanSettingsName);
+	if (handle == NULL)
+		return B_ENTRY_NOT_FOUND;
+
+	x = clamp_overscan(
+		atoi(get_driver_parameter(handle, "overscan_x", "0", "0")),
+		kOverscanStepX);
+	y = clamp_overscan(
+		atoi(get_driver_parameter(handle, "overscan_y", "0", "0")),
+		kOverscanStepY);
+
+	unload_driver_settings(handle);
+
+	return B_OK;
+}
+
+
+status_t
+ScreenWindow::_WriteOverscanFile(int32 x, int32 y) const
+{
+	BPath path;
+	status_t status = find_directory(B_USER_SETTINGS_DIRECTORY, &path, true);
+	if (status < B_OK)
+		return status;
+
+	path.Append("kernel/drivers");
+	status = create_directory(path.Path(), 0755);
+	if (status < B_OK)
+		return status;
+
+	path.Append(kOverscanSettingsName);
+
+	if (x == 0 && y == 0) {
+		BEntry entry(path.Path());
+		if (!entry.Exists())
+			return B_OK;
+
+		return entry.Remove();
+	}
+
+	BFile file;
+	status = file.SetTo(path.Path(),
+		B_CREATE_FILE | B_WRITE_ONLY | B_ERASE_FILE);
+	if (status < B_OK)
+		return status;
+
+	char buffer[256];
+	snprintf(buffer, sizeof(buffer), "overscan_x %" B_PRId32 "\noverscan_y %"
+		B_PRId32 "\n", x, y);
+
+	ssize_t bytesWritten = file.Write(buffer, strlen(buffer));
+	if (bytesWritten < B_OK)
+		return bytesWritten;
+
+	return B_OK;
+}
+
+
+#endif	// __powerpc__
+
+
 void
 ScreenWindow::_BuildSupportedColorSpaces()
 {
@@ -1289,25 +1481,39 @@ ScreenWindow::_BuildSupportedColorSpaces()
 }
 
 
+/*!	Whether the selected mode still has to be handed to the screen, either
+	because it differs from the active one or because another workspace does.
+*/
+bool
+ScreenWindow::_ModeNeedsApplying()
+{
+	if (fSelected != fActive)
+		return true;
+
+	if (!fAllWorkspacesItem->IsMarked())
+		return false;
+
+	screen_mode screenMode;
+	const int32 workspaceCount = count_workspaces();
+	for (int32 i = 0; i < workspaceCount; i++) {
+		fScreenMode.Get(screenMode, i);
+		if (screenMode != fSelected)
+			return true;
+	}
+
+	return false;
+}
+
+
 void
 ScreenWindow::_CheckApplyEnabled()
 {
-	bool applyEnabled = true;
+	bool applyEnabled = _ModeNeedsApplying();
 
-	if (fSelected == fActive) {
-		applyEnabled = false;
-		if (fAllWorkspacesItem->IsMarked()) {
-			screen_mode screenMode;
-			const int32 workspaceCount = count_workspaces();
-			for (int32 i = 0; i < workspaceCount; i++) {
-				fScreenMode.Get(screenMode, i);
-				if (screenMode != fSelected) {
-					applyEnabled = true;
-					break;
-				}
-			}
-		}
-	}
+#ifdef __powerpc__
+	if (_OverscanX() != fAppliedOverscanX || _OverscanY() != fAppliedOverscanY)
+		applyEnabled = true;
+#endif
 
 	fApplyButton->SetEnabled(applyEnabled);
 
@@ -1319,10 +1525,20 @@ ScreenWindow::_CheckApplyEnabled()
 	float brightness = -1;
 	screen.GetBrightness(&brightness);
 
-	fRevertButton->SetEnabled(columns != fOriginalWorkspacesColumns
+	bool revertEnabled = columns != fOriginalWorkspacesColumns
 		|| rows != fOriginalWorkspacesRows
 		|| brightness != fOriginalBrightness
-		|| fSelected != fOriginal);
+		|| fSelected != fOriginal;
+
+#ifdef __powerpc__
+	revertEnabled = revertEnabled
+		|| _OverscanX() != fOriginalOverscanX
+		|| _OverscanY() != fOriginalOverscanY
+		|| fAppliedOverscanX != fOriginalOverscanX
+		|| fAppliedOverscanY != fOriginalOverscanY;
+#endif
+
+	fRevertButton->SetEnabled(revertEnabled);
 }
 
 
@@ -1423,6 +1639,33 @@ ScreenWindow::_UpdateColorLabel()
 void
 ScreenWindow::_Apply()
 {
+#ifdef __powerpc__
+	if (_OverscanX() != fAppliedOverscanX
+		|| _OverscanY() != fAppliedOverscanY) {
+		status_t status = _WriteOverscanFile(_OverscanX(), _OverscanY());
+		if (status == B_OK) {
+			fAppliedOverscanX = _OverscanX();
+			fAppliedOverscanY = _OverscanY();
+		} else {
+			BString warning = B_TRANSLATE("Could not write the overscan "
+				"settings file:\n\t");
+			warning << strerror(status);
+			BAlert* alert = new BAlert(B_TRANSLATE("Warning"),
+				warning.String(), B_TRANSLATE("OK"), NULL, NULL,
+				B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+			alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
+			alert->Go();
+		}
+	}
+
+	// the Wii has a single mode, so don't ask to confirm a switch that the
+	// overscan change alone enabled the Apply button for
+	if (!_ModeNeedsApplying()) {
+		_CheckApplyEnabled();
+		return;
+	}
+#endif
+
 	// make checkpoint, so we can undo these changes
 	fUndoScreenMode.UpdateOriginalModes();
 
