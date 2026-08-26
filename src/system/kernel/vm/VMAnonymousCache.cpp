@@ -1365,8 +1365,12 @@ VMAnonymousCache::_MergeSwapPages(VMAnonymousCache* source)
 			// already a swap block in the consumer cache. Copy the respective
 			// swap addresses and discard the source swap block.
 			for (uint32 i = 0; i < SWAP_BLOCK_PAGES; i++) {
-				if (sourceSwapBlock->swap_slots[i] != SWAP_SLOT_NONE)
+				if (sourceSwapBlock->swap_slots[i] != SWAP_SLOT_NONE) {
 					swapBlock->swap_slots[i] = sourceSwapBlock->swap_slots[i];
+					// Every adopted slot must count, or the block is freed
+					// with live slots inside once the consumer's own are gone.
+					swapBlock->used++;
+				}
 			}
 
 			object_cache_free(sSwapBlockCache, sourceSwapBlock,
