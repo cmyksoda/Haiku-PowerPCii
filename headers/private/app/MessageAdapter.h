@@ -43,6 +43,14 @@ public:
 	static	status_t			ConvertToKMessage(const BMessage* from,
 									KMessage& to);
 
+	// undo the byte order of a native message flattened on a foreign host
+	static	void				SwapHaikuHeader(
+									BMessage::message_header* header);
+	static	status_t			SwapHaikuBody(
+									const BMessage::message_header* header,
+									BMessage::field_header* fields,
+									uint8* data);
+
 private:
 	static	status_t			_ConvertFromKMessage(const KMessage* from,
 									BMessage* to);

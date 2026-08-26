@@ -865,8 +865,10 @@ BMessage::Unflatten(const char *flatBuffer)
 		return B_BAD_VALUE;
 
 	uint32 format = *(uint32 *)flatBuffer;
-	if (format != MESSAGE_FORMAT_HAIKU)
+	if (format != MESSAGE_FORMAT_HAIKU
+		&& format != MESSAGE_FORMAT_HAIKU_SWAPPED) {
 		return BPrivate::MessageAdapter::Unflatten(format, this, flatBuffer);
+	}
 
 	// native message unflattening
 
@@ -876,8 +878,13 @@ BMessage::Unflatten(const char *flatBuffer)
 	if (fHeader == NULL)
 		return B_NO_MEMORY;
 
+	bool swapped = format == MESSAGE_FORMAT_HAIKU_SWAPPED;
 	memcpy(fHeader, flatBuffer, sizeof(message_header));
 	flatBuffer += sizeof(message_header);
+
+	// nothing in the header is readable before the byte order is undone
+	if (swapped)
+		BPrivate::MessageAdapter::SwapHaikuHeader(fHeader);
 
 	if (fHeader->format != MESSAGE_FORMAT_HAIKU
 		|| (fHeader->flags & MESSAGE_FLAG_VALID) == 0) {
@@ -918,6 +925,15 @@ BMessage::Unflatten(const char *flatBuffer)
 
 			memcpy(fData, flatBuffer, fHeader->data_size);
 		}
+
+		if (swapped && fFields != NULL) {
+			status_t swapResult = BPrivate::MessageAdapter::SwapHaikuBody(
+				fHeader, fFields, fData);
+			if (swapResult != B_OK) {
+				MakeEmpty();
+				return swapResult;
+			}
+		}
 	}
 
 	return _ValidateMessage();
@@ -933,8 +949,10 @@ BMessage::Unflatten(BDataIO *stream)
 
 	uint32 format = 0;
 	stream->Read(&format, sizeof(uint32));
-	if (format != MESSAGE_FORMAT_HAIKU)
+	if (format != MESSAGE_FORMAT_HAIKU
+		&& format != MESSAGE_FORMAT_HAIKU_SWAPPED) {
 		return BPrivate::MessageAdapter::Unflatten(format, this, stream);
+	}
 
 	// native message unflattening
 
@@ -944,14 +962,23 @@ BMessage::Unflatten(BDataIO *stream)
 	if (fHeader == NULL)
 		return B_NO_MEMORY;
 
+	bool swapped = format == MESSAGE_FORMAT_HAIKU_SWAPPED;
 	fHeader->format = format;
 	uint8 *header = (uint8 *)fHeader;
 	ssize_t result = stream->Read(header + sizeof(uint32),
 		sizeof(message_header) - sizeof(uint32));
-	if (result != sizeof(message_header) - sizeof(uint32)
-		|| (fHeader->flags & MESSAGE_FLAG_VALID) == 0) {
+	if (result != sizeof(message_header) - sizeof(uint32)) {
 		_InitHeader();
 		return result < 0 ? result : B_BAD_VALUE;
+	}
+
+	// nothing in the header is readable before the byte order is undone
+	if (swapped)
+		BPrivate::MessageAdapter::SwapHaikuHeader(fHeader);
+
+	if ((fHeader->flags & MESSAGE_FLAG_VALID) == 0) {
+		_InitHeader();
+		return B_BAD_VALUE;
 	}
 
 	what = fHeader->what;
@@ -983,6 +1010,15 @@ BMessage::Unflatten(BDataIO *stream)
 		result = stream->Read(fData, fHeader->data_size);
 		if (result != (ssize_t)fHeader->data_size)
 			return result < 0 ? result : B_BAD_VALUE;
+	}
+
+	if (swapped && fFields != NULL) {
+		status_t swapResult = BPrivate::MessageAdapter::SwapHaikuBody(fHeader,
+			fFields, fData);
+		if (swapResult != B_OK) {
+			MakeEmpty();
+			return swapResult;
+		}
 	}
 
 	return _ValidateMessage();

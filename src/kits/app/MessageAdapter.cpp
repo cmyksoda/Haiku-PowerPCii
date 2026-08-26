@@ -277,6 +277,77 @@ MessageAdapter::ConvertToKMessage(const BMessage* from, KMessage& to)
 }
 
 
+/*static*/ void
+MessageAdapter::SwapHaikuHeader(BMessage::message_header* header)
+{
+	header->what = __swap_int32(header->what);
+	header->flags = __swap_int32(header->flags);
+	header->target = __swap_int32(header->target);
+	header->current_specifier = __swap_int32(header->current_specifier);
+	header->message_area = __swap_int32(header->message_area);
+	header->reply_port = __swap_int32(header->reply_port);
+	header->reply_target = __swap_int32(header->reply_target);
+	header->reply_team = __swap_int32(header->reply_team);
+	header->data_size = __swap_int32(header->data_size);
+	header->field_count = __swap_int32(header->field_count);
+	header->hash_table_size = __swap_int32(header->hash_table_size);
+	for (int32 i = 0; i < MESSAGE_BODY_HASH_TABLE_SIZE; i++)
+		header->hash_table[i] = __swap_int32(header->hash_table[i]);
+
+	header->format = MESSAGE_FORMAT_HAIKU;
+}
+
+
+/*static*/ status_t
+MessageAdapter::SwapHaikuBody(const BMessage::message_header* header,
+	BMessage::field_header* fields, uint8* data)
+{
+	for (uint32 i = 0; i < header->field_count; i++) {
+		BMessage::field_header* field = &fields[i];
+		field->flags = __swap_int16(field->flags);
+		field->name_length = __swap_int16(field->name_length);
+		field->type = __swap_int32(field->type);
+		field->count = __swap_int32(field->count);
+		field->data_size = __swap_int32(field->data_size);
+		field->offset = __swap_int32(field->offset);
+		field->next_field = __swap_int32(field->next_field);
+
+		// the bounds have to hold before we write into the data block
+		if ((uint64)field->offset + field->name_length + field->data_size
+				> header->data_size) {
+			return B_BAD_VALUE;
+		}
+
+		uint8* item = data + field->offset + field->name_length;
+		if ((field->flags & FIELD_FLAG_FIXED_SIZE) != 0) {
+			// swap_data() rejects the types it does not know (raw bytes,
+			// strings, refs, ...) and those have to be left untouched
+			swap_data(field->type, item, field->data_size, B_SWAP_ALWAYS);
+			continue;
+		}
+
+		// Variable sized items each carry their own uint32 size prefix.
+		// Nested messages keep their magic and are swapped when unflattened.
+		uint8* end = item + field->data_size;
+		for (uint32 j = 0; j < field->count; j++) {
+			if (end - item < (ptrdiff_t)sizeof(uint32))
+				return B_BAD_VALUE;
+
+			uint32 size = __swap_int32(*(uint32*)item);
+			*(uint32*)item = size;
+			item += sizeof(uint32);
+			if ((uint64)size > (uint64)(end - item))
+				return B_BAD_VALUE;
+
+			swap_data(field->type, item, size, B_SWAP_ALWAYS);
+			item += size;
+		}
+	}
+
+	return B_OK;
+}
+
+
 /*static*/ status_t
 MessageAdapter::_ConvertFromKMessage(const KMessage *fromMessage,
 	BMessage *toMessage)
