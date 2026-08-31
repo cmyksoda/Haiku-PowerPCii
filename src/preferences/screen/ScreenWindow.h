@@ -19,6 +19,7 @@
 
 
 class BBox;
+class BCheckBox;
 class BPopUpMenu;
 class BMenuField;
 class BSlider;
@@ -66,11 +67,14 @@ private:
 
 #ifdef __powerpc__
 			void			_UpdateOverscanControls();
-			void			_SetOverscan(int32 x, int32 y);
+			void			_SetOverscan(int32 x, int32 y, bool widescreen);
 			int32			_OverscanX() const;
 			int32			_OverscanY() const;
-			status_t		_ReadOverscanFile(int32& x, int32& y) const;
-			status_t		_WriteOverscanFile(int32 x, int32 y) const;
+			bool			_Widescreen() const;
+			status_t		_ReadOverscanFile(int32& x, int32& y,
+								bool& widescreen) const;
+			status_t		_WriteOverscanFile(int32 x, int32 y,
+								bool widescreen) const;
 #endif
 
 private:
@@ -111,12 +115,15 @@ private:
 #ifdef __powerpc__
 			BSlider*		fOverscanXSlider;
 			BSlider*		fOverscanYSlider;
+			BCheckBox*		fWidescreenBox;
 			int32			fNativeWidth;
 			int32			fNativeHeight;
 			int32			fOriginalOverscanX;
 			int32			fOriginalOverscanY;
 			int32			fAppliedOverscanX;
 			int32			fAppliedOverscanY;
+			bool			fOriginalWidescreen;
+			bool			fAppliedWidescreen;
 #endif
 
 			BButton*		fDefaultsButton;

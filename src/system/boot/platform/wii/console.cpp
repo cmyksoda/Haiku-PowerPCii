@@ -166,12 +166,13 @@ overscan_parameter(void *settings, const char *key, int granularity)
 }
 
 
-/*!	Insets the picture so a CRT's overscan cannot swallow the Deskbar. The VI
-	is programmed once and the kernel never touches it again, so this is the
+/*!	Applies the wii_video driver settings: an overscan inset so a CRT cannot
+	swallow the Deskbar, and an anamorphic widescreen desktop. The VI is
+	programmed once and the kernel never touches it again, so this is the
 	last chance to change the geometry the desktop is built for.
 */
 void
-video_apply_overscan(void)
+video_apply_settings(void)
 {
 	if (sVideoMode == NULL || !gKernelArgs.frame_buffer.enabled)
 		return;
@@ -184,45 +185,57 @@ video_apply_overscan(void)
 		kOverscanGranularityX);
 	int insetY = overscan_parameter(settings, "overscan_y",
 		kOverscanGranularityY);
+	bool widescreen = get_driver_boolean_parameter(settings, "widescreen",
+		false, true);
 	unload_driver_settings(settings);
 
-	if (insetX == 0 && insetY == 0)
+	if (insetX == 0 && insetY == 0 && !widescreen)
 		return;
 
-	sOverscanMode = *sVideoMode;
-	sOverscanMode.fbWidth -= 2 * insetX;
-	sOverscanMode.viWidth -= 2 * insetX;
-	sOverscanMode.viXOrigin += insetX;
-	sOverscanMode.xfbHeight -= 2 * insetY;
-	sOverscanMode.viHeight -= 2 * insetY;
-	sOverscanMode.viYOrigin += insetY;
-	sVideoMode = &sOverscanMode;
+	if (insetX != 0 || insetY != 0) {
+		sOverscanMode = *sVideoMode;
+		sOverscanMode.fbWidth -= 2 * insetX;
+		sOverscanMode.viWidth -= 2 * insetX;
+		sOverscanMode.viXOrigin += insetX;
+		sOverscanMode.xfbHeight -= 2 * insetY;
+		sOverscanMode.viHeight -= 2 * insetY;
+		sOverscanMode.viYOrigin += insetY;
+		sVideoMode = &sOverscanMode;
 
-	VIDEO_ClearFrameBuffer(sVideoMode, sFrameBuffer, COLOR_BLACK);
-	VIDEO_Configure(sVideoMode);
-	VIDEO_SetNextFramebuffer(sFrameBuffer);
-	VIDEO_SetBlack(FALSE);
-	VIDEO_Flush();
-	VIDEO_WaitVSync();
-	if ((sVideoMode->viTVMode & VI_NON_INTERLACE) != 0)
+		VIDEO_ClearFrameBuffer(sVideoMode, sFrameBuffer, COLOR_BLACK);
+		VIDEO_Configure(sVideoMode);
+		VIDEO_SetNextFramebuffer(sFrameBuffer);
+		VIDEO_SetBlack(FALSE);
+		VIDEO_Flush();
 		VIDEO_WaitVSync();
+		if ((sVideoMode->viTVMode & VI_NON_INTERLACE) != 0)
+			VIDEO_WaitVSync();
 
-	// the console's stride came from the old mode, so re-lay it out
-	CON_Init(sFrameBuffer, 20, 20, sVideoMode->fbWidth, sVideoMode->xfbHeight,
-		sVideoMode->fbWidth * VI_DISPLAY_PIX_SZ);
+		// the console's stride came from the old mode, so re-lay it out
+		CON_Init(sFrameBuffer, 20, 20, sVideoMode->fbWidth,
+			sVideoMode->xfbHeight, sVideoMode->fbWidth * VI_DISPLAY_PIX_SZ);
+	}
 
 	uint32 width = sVideoMode->fbWidth;
 	uint32 height = sVideoMode->xfbHeight;
 
-	gKernelArgs.frame_buffer.width = width;
+	// A 16:9 TV stretches the raster, so a widescreen desktop is drawn
+	// wider and squeezed back by the kernel converter; app_server has no
+	// pixel-aspect concept. The shadow was allocated for this up front.
+	uint32 shadowWidth = width;
+	if (widescreen)
+		shadowWidth = (width * 4 / 3) & ~3;
+
+	gKernelArgs.frame_buffer.width = shadowWidth;
 	gKernelArgs.frame_buffer.height = height;
-	gKernelArgs.frame_buffer.bytes_per_row = width * 4;
-	gKernelArgs.frame_buffer.physical_buffer.size = width * height * 4;
+	gKernelArgs.frame_buffer.bytes_per_row = shadowWidth * 4;
+	gKernelArgs.frame_buffer.physical_buffer.size = shadowWidth * height * 4;
 	gKernelArgs.arch_args.wii_hardware_framebuffer.size
 		= width * height * VI_DISPLAY_PIX_SZ;
 
 	dprintf("frame buffer overscan: %d/%d per side, frame buffer: %" B_PRIu32
-		"x%" B_PRIu32 "\n", insetX, insetY, width, height);
+		"x%" B_PRIu32 ", scanout: %" B_PRIu32 "x%" B_PRIu32 "\n", insetX,
+		insetY, shadowWidth, height, width, height);
 }
 
 
@@ -240,14 +253,18 @@ platform_init_video(void)
 	uint32 height = sVideoMode->xfbHeight;
 	size_t size = width * height * 4;
 
+	// Driver settings aren't readable this early, so leave room for the
+	// widescreen shadow video_apply_settings() may later switch to.
+	size_t allocationSize = ((width * 4 / 3) & ~3) * height * 4;
+
 	void *shadow = NULL;
-	if (platform_allocate_region(&shadow, size, B_READ_AREA | B_WRITE_AREA)
-			!= B_OK) {
+	if (platform_allocate_region(&shadow, allocationSize,
+			B_READ_AREA | B_WRITE_AREA) != B_OK) {
 		dprintf("failed to allocate the %" B_PRIuSIZE " byte frame buffer\n",
-			size);
+			allocationSize);
 		return B_NO_MEMORY;
 	}
-	memset(shadow, 0, size);
+	memset(shadow, 0, allocationSize);
 
 	gKernelArgs.frame_buffer.enabled = true;
 	gKernelArgs.frame_buffer.physical_buffer.start

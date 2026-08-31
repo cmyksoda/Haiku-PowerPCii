@@ -26,6 +26,7 @@
 #include <Box.h>
 #include <Button.h>
 #include <Catalog.h>
+#include <CheckBox.h>
 #include <ControlLook.h>
 #include <Directory.h>
 #include <Entry.h>
@@ -81,6 +82,7 @@ const char* kBackgroundsSignature = "application/x-vnd.Haiku-Backgrounds";
 // interface, so the desktop can only be inset at the next boot.
 static const uint32 kMsgOverscanXChanged = 'ovsx';
 static const uint32 kMsgOverscanYChanged = 'ovsy';
+static const uint32 kMsgWidescreenChanged = 'wdsc';
 static const char* kOverscanSettingsName = "wii_video";
 static const int32 kMaxOverscan = 48;
 static const int32 kOverscanStepX = 8;
@@ -277,10 +279,18 @@ ScreenWindow::ScreenWindow(ScreenSettings* settings)
 
 #ifdef __powerpc__
 	// overscan sliders: the size the loader will build the desktop at
-	_ReadOverscanFile(fOriginalOverscanX, fOriginalOverscanY);
+	_ReadOverscanFile(fOriginalOverscanX, fOriginalOverscanY,
+		fOriginalWidescreen);
 	fAppliedOverscanX = fOriginalOverscanX;
 	fAppliedOverscanY = fOriginalOverscanY;
-	fNativeWidth = screen.Frame().IntegerWidth() + 1 + 2 * fOriginalOverscanX;
+	fAppliedWidescreen = fOriginalWidescreen;
+	fNativeWidth = screen.Frame().IntegerWidth() + 1;
+	if (fOriginalWidescreen) {
+		// undo the anamorphic stretch; scanout widths are multiples of 8,
+		// which absorbs the loader's rounding of the stretched width
+		fNativeWidth = ((fNativeWidth * 3 / 4) + 4) & ~7;
+	}
+	fNativeWidth += 2 * fOriginalOverscanX;
 	fNativeHeight = screen.Frame().IntegerHeight() + 1 + 2 * fOriginalOverscanY;
 
 	fOverscanXSlider = new BSlider("overscanX", NULL, NULL, 0,
@@ -294,6 +304,12 @@ ScreenWindow::ScreenWindow(ScreenSettings* settings)
 	fOverscanYSlider->SetModificationMessage(
 		new BMessage(kMsgOverscanYChanged));
 	fOverscanYSlider->SetValue(fOriginalOverscanY / kOverscanStepY);
+
+	fWidescreenBox = new BCheckBox("widescreen",
+		B_TRANSLATE("Widescreen (16:9)"),
+		new BMessage(kMsgWidescreenChanged));
+	fWidescreenBox->SetValue(fOriginalWidescreen
+		? B_CONTROL_ON : B_CONTROL_OFF);
 
 	BStringView* overscanNote = new BStringView("overscan note",
 		B_TRANSLATE("Takes effect after restart"));
@@ -639,6 +655,7 @@ ScreenWindow::ScreenWindow(ScreenSettings* settings)
 			.AddStrut(B_USE_DEFAULT_SPACING)
 			.Add(fOverscanXSlider)
 			.Add(fOverscanYSlider)
+			.Add(fWidescreenBox)
 			.Add(overscanNote)
 		.End();
 #endif
@@ -1277,13 +1294,16 @@ ScreenWindow::MessageReceived(BMessage* message)
 
 #ifdef __powerpc__
 			if ((fAppliedOverscanX != fOriginalOverscanX
-					|| fAppliedOverscanY != fOriginalOverscanY)
-				&& _WriteOverscanFile(fOriginalOverscanX, fOriginalOverscanY)
-					== B_OK) {
+					|| fAppliedOverscanY != fOriginalOverscanY
+					|| fAppliedWidescreen != fOriginalWidescreen)
+				&& _WriteOverscanFile(fOriginalOverscanX, fOriginalOverscanY,
+					fOriginalWidescreen) == B_OK) {
 				fAppliedOverscanX = fOriginalOverscanX;
 				fAppliedOverscanY = fOriginalOverscanY;
+				fAppliedWidescreen = fOriginalWidescreen;
 			}
-			_SetOverscan(fOriginalOverscanX, fOriginalOverscanY);
+			_SetOverscan(fOriginalOverscanX, fOriginalOverscanY,
+				fOriginalWidescreen);
 #endif
 
 			_UpdateActiveMode();
@@ -1315,6 +1335,7 @@ ScreenWindow::MessageReceived(BMessage* message)
 #ifdef __powerpc__
 		case kMsgOverscanXChanged:
 		case kMsgOverscanYChanged:
+		case kMsgWidescreenChanged:
 			_UpdateOverscanControls();
 			_CheckApplyEnabled();
 			break;
@@ -1374,11 +1395,19 @@ ScreenWindow::_OverscanY() const
 }
 
 
+bool
+ScreenWindow::_Widescreen() const
+{
+	return fWidescreenBox->Value() == B_CONTROL_ON;
+}
+
+
 void
-ScreenWindow::_SetOverscan(int32 x, int32 y)
+ScreenWindow::_SetOverscan(int32 x, int32 y, bool widescreen)
 {
 	fOverscanXSlider->SetValue(x / kOverscanStepX);
 	fOverscanYSlider->SetValue(y / kOverscanStepY);
+	fWidescreenBox->SetValue(widescreen ? B_CONTROL_ON : B_CONTROL_OFF);
 
 	_UpdateOverscanControls();
 }
@@ -1399,10 +1428,11 @@ ScreenWindow::_UpdateOverscanControls()
 
 
 status_t
-ScreenWindow::_ReadOverscanFile(int32& x, int32& y) const
+ScreenWindow::_ReadOverscanFile(int32& x, int32& y, bool& widescreen) const
 {
 	x = 0;
 	y = 0;
+	widescreen = false;
 
 	void* handle = load_driver_settings(kOverscanSettingsName);
 	if (handle == NULL)
@@ -1414,6 +1444,8 @@ ScreenWindow::_ReadOverscanFile(int32& x, int32& y) const
 	y = clamp_overscan(
 		atoi(get_driver_parameter(handle, "overscan_y", "0", "0")),
 		kOverscanStepY);
+	widescreen = get_driver_boolean_parameter(handle, "widescreen", false,
+		true);
 
 	unload_driver_settings(handle);
 
@@ -1422,7 +1454,7 @@ ScreenWindow::_ReadOverscanFile(int32& x, int32& y) const
 
 
 status_t
-ScreenWindow::_WriteOverscanFile(int32 x, int32 y) const
+ScreenWindow::_WriteOverscanFile(int32 x, int32 y, bool widescreen) const
 {
 	BPath path;
 	status_t status = find_directory(B_USER_SETTINGS_DIRECTORY, &path, true);
@@ -1436,7 +1468,7 @@ ScreenWindow::_WriteOverscanFile(int32 x, int32 y) const
 
 	path.Append(kOverscanSettingsName);
 
-	if (x == 0 && y == 0) {
+	if (x == 0 && y == 0 && !widescreen) {
 		BEntry entry(path.Path());
 		if (!entry.Exists())
 			return B_OK;
@@ -1452,7 +1484,7 @@ ScreenWindow::_WriteOverscanFile(int32 x, int32 y) const
 
 	char buffer[256];
 	snprintf(buffer, sizeof(buffer), "overscan_x %" B_PRId32 "\noverscan_y %"
-		B_PRId32 "\n", x, y);
+		B_PRId32 "\n%s", x, y, widescreen ? "widescreen true\n" : "");
 
 	ssize_t bytesWritten = file.Write(buffer, strlen(buffer));
 	if (bytesWritten < B_OK)
@@ -1511,7 +1543,8 @@ ScreenWindow::_CheckApplyEnabled()
 	bool applyEnabled = _ModeNeedsApplying();
 
 #ifdef __powerpc__
-	if (_OverscanX() != fAppliedOverscanX || _OverscanY() != fAppliedOverscanY)
+	if (_OverscanX() != fAppliedOverscanX || _OverscanY() != fAppliedOverscanY
+		|| _Widescreen() != fAppliedWidescreen)
 		applyEnabled = true;
 #endif
 
@@ -1534,8 +1567,10 @@ ScreenWindow::_CheckApplyEnabled()
 	revertEnabled = revertEnabled
 		|| _OverscanX() != fOriginalOverscanX
 		|| _OverscanY() != fOriginalOverscanY
+		|| _Widescreen() != fOriginalWidescreen
 		|| fAppliedOverscanX != fOriginalOverscanX
-		|| fAppliedOverscanY != fOriginalOverscanY;
+		|| fAppliedOverscanY != fOriginalOverscanY
+		|| fAppliedWidescreen != fOriginalWidescreen;
 #endif
 
 	fRevertButton->SetEnabled(revertEnabled);
@@ -1641,11 +1676,14 @@ ScreenWindow::_Apply()
 {
 #ifdef __powerpc__
 	if (_OverscanX() != fAppliedOverscanX
-		|| _OverscanY() != fAppliedOverscanY) {
-		status_t status = _WriteOverscanFile(_OverscanX(), _OverscanY());
+		|| _OverscanY() != fAppliedOverscanY
+		|| _Widescreen() != fAppliedWidescreen) {
+		status_t status = _WriteOverscanFile(_OverscanX(), _OverscanY(),
+			_Widescreen());
 		if (status == B_OK) {
 			fAppliedOverscanX = _OverscanX();
 			fAppliedOverscanY = _OverscanY();
+			fAppliedWidescreen = _Widescreen();
 		} else {
 			BString warning = B_TRANSLATE("Could not write the overscan "
 				"settings file:\n\t");

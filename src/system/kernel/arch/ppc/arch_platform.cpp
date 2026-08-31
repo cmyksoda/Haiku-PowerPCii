@@ -6,6 +6,7 @@
 #include <arch_platform.h>
 
 #include <new>
+#include <stdlib.h>
 
 #include <KernelExport.h>
 
@@ -201,6 +202,8 @@ private:
 	void* fRealFrameBuffer;
 	int fFrameBufferWidth;
 	int fFrameBufferHeight;
+	int fXfbWidth;
+	uint16* fResampleMap;
 };
 
 }	// namespace BPrivate
@@ -214,7 +217,9 @@ PPCWii::PPCWii()
 	fFakeFrameBuffer(NULL),
 	fRealFrameBuffer(NULL),
 	fFrameBufferWidth(0),
-	fFrameBufferHeight(0)
+	fFrameBufferHeight(0),
+	fXfbWidth(0),
+	fResampleMap(NULL)
 {
 }
 
@@ -275,6 +280,20 @@ PPCWii::InitPostVM(struct kernel_args *kernelArgs)
 		return B_ERROR;
 	}
 
+	// A widescreen shadow is wider than the XFB; precompute the horizontal
+	// nearest-neighbor map so the resample costs no extra uncached traffic.
+	fXfbWidth = realSize / (fFrameBufferHeight * 2);
+	if (fXfbWidth != fFrameBufferWidth) {
+		fResampleMap = (uint16*)malloc(fXfbWidth * sizeof(uint16));
+		if (fResampleMap == NULL)
+			return B_NO_MEMORY;
+		for (int x = 0; x < fXfbWidth; x++)
+			fResampleMap[x] = x * fFrameBufferWidth / fXfbWidth;
+		dprintf("PPCWii: resampling %dx%d shadow to %dx%d scanout\n",
+			fFrameBufferWidth, fFrameBufferHeight, fXfbWidth,
+			fFrameBufferHeight);
+	}
+
 	return B_OK;
 }
 
@@ -290,6 +309,40 @@ PPCWii::InitPostThread(struct kernel_args *kernelArgs)
 		return thread;
 
 	return resume_thread(thread);
+}
+
+
+/*!	Converts two B_RGB32 pixels to one YUYV word. Both buffers are
+	cache-inhibited, so everything moves word-at-a-time: 3 bus accesses per
+	pixel pair instead of the 10 a bytewise loop costs.
+	app_server's B_RGB32 is B,G,R,X byte order in memory on every arch
+	(Painter uses agg::order_bgra), so a big-endian load is B G R X from the
+	top byte down.
+*/
+static inline uint32
+rgb_pair_to_yuyv(uint32 p0, uint32 p1)
+{
+	int b0 = p0 >> 24;
+	int g0 = (p0 >> 16) & 0xff;
+	int r0 = (p0 >> 8) & 0xff;
+	int b1 = p1 >> 24;
+	int g1 = (p1 >> 16) & 0xff;
+	int r1 = (p1 >> 8) & 0xff;
+
+	// Y = (77*R + 150*G + 29*B) >> 8, U/V per the usual approximation; each
+	// coefficient row sums to 256 or +-128, so no clamping is needed.
+	int y0 = (77 * r0 + 150 * g0 + 29 * b0) >> 8;
+	int y1 = (77 * r1 + 150 * g1 + 29 * b1) >> 8;
+
+	int r = (r0 + r1) >> 1;
+	int g = (g0 + g1) >> 1;
+	int b = (b0 + b1) >> 1;
+
+	uint32 u = ((-43 * r - 85 * g + 128 * b) >> 8) + 128;
+	uint32 v = ((128 * r - 107 * g - 21 * b) >> 8) + 128;
+
+	// YUYV: Y0 U0 Y1 V0
+	return ((uint32)y0 << 24) | (u << 16) | ((uint32)y1 << 8) | v;
 }
 
 
@@ -309,43 +362,26 @@ PPCWii::VideoThread(void* arg)
 		uint32* src = (uint32*)self->fFakeFrameBuffer;
 		uint32* dst = (uint32*)self->fRealFrameBuffer;
 
-		int pairs = (self->fFrameBufferWidth & ~1)
-			* self->fFrameBufferHeight / 2;
-
 		bigtime_t frameStart = system_time();
 
-		// Convert RGB32 to YUYV (YUV422). Both buffers are cache-inhibited,
-		// so touch them word-at-a-time: 3 bus accesses per pixel pair
-		// instead of the 10 a bytewise loop costs.
-		// app_server's B_RGB32 is B,G,R,X byte order in memory on every arch
-		// (Painter uses agg::order_bgra), so a big-endian load is B G R X
-		// from the top byte down.
-		for (int i = 0; i < pairs; i++) {
-			uint32 p0 = *src++;
-			uint32 p1 = *src++;
-
-			int b0 = p0 >> 24;
-			int g0 = (p0 >> 16) & 0xff;
-			int r0 = (p0 >> 8) & 0xff;
-			int b1 = p1 >> 24;
-			int g1 = (p1 >> 16) & 0xff;
-			int r1 = (p1 >> 8) & 0xff;
-
-			// Y = (77*R + 150*G + 29*B) >> 8, U/V per the usual
-			// approximation; each coefficient row sums to 256 or +-128, so
-			// no clamping is needed.
-			int y0 = (77 * r0 + 150 * g0 + 29 * b0) >> 8;
-			int y1 = (77 * r1 + 150 * g1 + 29 * b1) >> 8;
-
-			int r = (r0 + r1) >> 1;
-			int g = (g0 + g1) >> 1;
-			int b = (b0 + b1) >> 1;
-
-			uint32 u = ((-43 * r - 85 * g + 128 * b) >> 8) + 128;
-			uint32 v = ((128 * r - 107 * g - 21 * b) >> 8) + 128;
-
-			// YUYV: Y0 U0 Y1 V0
-			*dst++ = ((uint32)y0 << 24) | (u << 16) | ((uint32)y1 << 8) | v;
+		if (self->fResampleMap == NULL) {
+			int pairs = (self->fFrameBufferWidth & ~1)
+				* self->fFrameBufferHeight / 2;
+			for (int i = 0; i < pairs; i++) {
+				uint32 p0 = *src++;
+				uint32 p1 = *src++;
+				*dst++ = rgb_pair_to_yuyv(p0, p1);
+			}
+		} else {
+			// Wider shadow: squeeze each row through the precomputed map.
+			int width = self->fXfbWidth;
+			int srcWidth = self->fFrameBufferWidth;
+			const uint16* map = self->fResampleMap;
+			for (int y = 0; y < self->fFrameBufferHeight; y++) {
+				uint32* row = src + y * srcWidth;
+				for (int x = 0; x < width; x += 2)
+					*dst++ = rgb_pair_to_yuyv(row[map[x]], row[map[x + 1]]);
+			}
 		}
 
 		// This copy is suspected of eating most of the core; keep its cost
