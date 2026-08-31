@@ -648,7 +648,11 @@ EventDispatcher::_SendMessage(BMessenger& messenger, BMessage* message,
 	// TODO: add failed messages to a queue, and start dropping them by importance
 	//	(and use the same mechanism in ServerWindow::SendMessageToClient())
 
-	status_t status = messenger.SendMessage(message, (BHandler*)NULL, 0);
+	// A button or key event must not vanish just because the target's port
+	// was momentarily full (a client stalled faulting pages, say); only the
+	// mouse-moved flood is cheap enough to drop outright.
+	bigtime_t timeout = importance > kMouseMovedImportance ? 250000 : 0;
+	status_t status = messenger.SendMessage(message, (BHandler*)NULL, timeout);
 	if (status != B_OK) {
 		printf("EventDispatcher: failed to send message '%.4s' to target: %s\n",
 			(char*)&message->what, strerror(status));
