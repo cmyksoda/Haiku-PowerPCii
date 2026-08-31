@@ -250,9 +250,13 @@ PPCWii::InitPostVM(struct kernel_args *kernelArgs)
 	fFrameBufferHeight = kernelArgs->frame_buffer.height;
 	size_t fakeSize = fFrameBufferWidth * fFrameBufferHeight * 4;
 	
+	// Write-combining = cache-inhibited but non-guarded: loads and stores can
+	// gather instead of one strictly ordered bus transaction each (the same
+	// reasoning as the framebuffer driver's remap_frame_buffer()).
 	fFakeFrameBufferArea = map_physical_memory("wii fake rgb framebuffer",
 		kernelArgs->frame_buffer.physical_buffer.start, fakeSize,
-		B_ANY_KERNEL_ADDRESS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, &fFakeFrameBuffer);
+		B_ANY_KERNEL_ADDRESS | B_WRITE_COMBINING_MEMORY,
+		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, &fFakeFrameBuffer);
 		
 	if (fFakeFrameBufferArea < 0) {
 		dprintf("PPCWii: Failed to map fake framebuffer\n");
@@ -263,7 +267,8 @@ PPCWii::InitPostVM(struct kernel_args *kernelArgs)
 	size_t realSize = kernelArgs->arch_args.wii_hardware_framebuffer.size;
 	fRealFrameBufferArea = map_physical_memory("wii real yuyv framebuffer",
 		kernelArgs->arch_args.wii_hardware_framebuffer.start, realSize,
-		B_ANY_KERNEL_ADDRESS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, &fRealFrameBuffer);
+		B_ANY_KERNEL_ADDRESS | B_WRITE_COMBINING_MEMORY,
+		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, &fRealFrameBuffer);
 		
 	if (fRealFrameBufferArea < 0) {
 		dprintf("PPCWii: Failed to map real framebuffer\n");
@@ -292,58 +297,70 @@ int32
 PPCWii::VideoThread(void* arg)
 {
 	PPCWii* self = (PPCWii*)arg;
-	
+
+	bigtime_t windowTime = 0;
+	uint32 frames = 0;
+	uint32 lastReport = 0;
+
 	while (true) {
 		// Wait ~33ms (30 FPS)
 		snooze(33333);
 
-		uint8* src = (uint8*)self->fFakeFrameBuffer;
-		uint8* dst = (uint8*)self->fRealFrameBuffer;
+		uint32* src = (uint32*)self->fFakeFrameBuffer;
+		uint32* dst = (uint32*)self->fRealFrameBuffer;
 
-		int pixels = self->fFrameBufferWidth * self->fFrameBufferHeight;
+		int pairs = (self->fFrameBufferWidth & ~1)
+			* self->fFrameBufferHeight / 2;
 
-		// Convert RGB32 to YUYV (YUV422)
+		bigtime_t frameStart = system_time();
+
+		// Convert RGB32 to YUYV (YUV422). Both buffers are cache-inhibited,
+		// so touch them word-at-a-time: 3 bus accesses per pixel pair
+		// instead of the 10 a bytewise loop costs.
 		// app_server's B_RGB32 is B,G,R,X byte order in memory on every arch
-		// (Painter uses agg::order_bgra; see DrawingModeCopy.h ASSIGN_COPY).
-		for (int i = 0; i < pixels; i += 2) {
-			uint8 b0 = src[i*4 + 0];
-			uint8 g0 = src[i*4 + 1];
-			uint8 r0 = src[i*4 + 2];
+		// (Painter uses agg::order_bgra), so a big-endian load is B G R X
+		// from the top byte down.
+		for (int i = 0; i < pairs; i++) {
+			uint32 p0 = *src++;
+			uint32 p1 = *src++;
 
-			uint8 b1 = src[(i+1)*4 + 0];
-			uint8 g1 = src[(i+1)*4 + 1];
-			uint8 r1 = src[(i+1)*4 + 2];
-			
-			// Approximation formulas:
-			// Y = (77*R + 150*G + 29*B) >> 8
-			// U = ((-43*R - 85*G + 128*B) >> 8) + 128
-			// V = ((128*R - 107*G - 21*B) >> 8) + 128
-			
+			int b0 = p0 >> 24;
+			int g0 = (p0 >> 16) & 0xff;
+			int r0 = (p0 >> 8) & 0xff;
+			int b1 = p1 >> 24;
+			int g1 = (p1 >> 16) & 0xff;
+			int r1 = (p1 >> 8) & 0xff;
+
+			// Y = (77*R + 150*G + 29*B) >> 8, U/V per the usual
+			// approximation; each coefficient row sums to 256 or +-128, so
+			// no clamping is needed.
 			int y0 = (77 * r0 + 150 * g0 + 29 * b0) >> 8;
 			int y1 = (77 * r1 + 150 * g1 + 29 * b1) >> 8;
-			
-			// Average R, G, B for U and V
-			int r_avg = (r0 + r1) / 2;
-			int g_avg = (g0 + g1) / 2;
-			int b_avg = (b0 + b1) / 2;
-			
-			int u = ((-43 * r_avg - 85 * g_avg + 128 * b_avg) >> 8) + 128;
-			int v = ((128 * r_avg - 107 * g_avg - 21 * b_avg) >> 8) + 128;
-			
-			// Clamp values
-			if (y0 > 255) { y0 = 255; } else if (y0 < 0) { y0 = 0; }
-			if (y1 > 255) { y1 = 255; } else if (y1 < 0) { y1 = 0; }
-			if (u > 255) { u = 255; } else if (u < 0) { u = 0; }
-			if (v > 255) { v = 255; } else if (v < 0) { v = 0; }
-			
-			// YUYV format: Y0 U0 Y1 V0
-			dst[i*2 + 0] = y0;
-			dst[i*2 + 1] = u;
-			dst[i*2 + 2] = y1;
-			dst[i*2 + 3] = v;
+
+			int r = (r0 + r1) >> 1;
+			int g = (g0 + g1) >> 1;
+			int b = (b0 + b1) >> 1;
+
+			uint32 u = ((-43 * r - 85 * g + 128 * b) >> 8) + 128;
+			uint32 v = ((128 * r - 107 * g - 21 * b) >> 8) + 128;
+
+			// YUYV: Y0 U0 Y1 V0
+			*dst++ = ((uint32)y0 << 24) | (u << 16) | ((uint32)y1 << 8) | v;
+		}
+
+		// This copy is suspected of eating most of the core; keep its cost
+		// visible in the syslog (one line per ~1024 frames).
+		windowTime += system_time() - frameStart;
+		frames++;
+		if (frames == 32 || frames - lastReport >= 1024) {
+			dprintf("wii video: convert avg %" B_PRId64 " us over frames %"
+				B_PRIu32 "..%" B_PRIu32 "\n",
+				windowTime / (frames - lastReport), lastReport + 1, frames);
+			windowTime = 0;
+			lastReport = frames;
 		}
 	}
-	
+
 	return 0;
 }
 
