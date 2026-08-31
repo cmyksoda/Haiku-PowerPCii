@@ -263,10 +263,21 @@ platform_init_video(void)
 	gKernelArgs.arch_args.wii_hardware_framebuffer.size
 		= width * height * VI_DISPLAY_PIX_SZ;
 
+	gKernelArgs.arch_args.wii_aspect = CONF_GetAspectRatio() > 0 ? 1 : 0;
+
 	dprintf("frame buffer: %" B_PRIu32 "x%" B_PRIu32 ", shadow at %p, "
 		"scanout at %p\n", width, height,
 		(void *)(addr_t)gKernelArgs.frame_buffer.physical_buffer.start,
 		(void *)(addr_t)gKernelArgs.arch_args.wii_hardware_framebuffer.start);
+	dprintf("video mode: tv 0x%" B_PRIx32 " fb %ux%u vi %ux%u origin %u/%u "
+		"xfbMode %" B_PRIu32 " aa %u\n", sVideoMode->viTVMode,
+		sVideoMode->fbWidth, sVideoMode->xfbHeight, sVideoMode->viWidth,
+		sVideoMode->viHeight, sVideoMode->viXOrigin, sVideoMode->viYOrigin,
+		sVideoMode->xfbMode, sVideoMode->aa);
+	dprintf("video conf: video %d aspect %d progressive %d eurgb60 %d "
+		"component %d\n", CONF_GetVideo(), CONF_GetAspectRatio(),
+		CONF_GetProgressiveScan(), CONF_GetEuRGB60(),
+		VIDEO_HaveComponentCable());
 
 	return B_OK;
 }
