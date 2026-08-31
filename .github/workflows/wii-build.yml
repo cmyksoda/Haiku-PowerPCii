@@ -30,7 +30,7 @@ jobs:
         apt-get install -y git nasm flex bison gawk \
                                 mtools xorriso zlib1g-dev \
                                 mkisofs python3 wget libzstd-dev \
-                                u-boot-tools xattr build-essential
+                                u-boot-tools attr build-essential
 
     - name: Restore Cross Tools
       id: cross-tools
