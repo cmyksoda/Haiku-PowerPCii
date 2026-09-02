@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include <Message.h>
+#include <Messenger.h>
 #include <OS.h>
 #include <View.h>
 
@@ -259,6 +260,26 @@ GeckoInputDevice::_HandleKey(const wii_gecko_input_packet& packet)
 	else
 		fKeyStates[key >> 3] &= ~(0x80 >> (key & 7));
 
+	// The menu key alone opens the Deskbar menu, as the keyboard add-on does;
+	// on this port it is the one way to open it without a pointer.
+	if (pressed && key == 0x68) {
+		bool alone = true;
+		for (uint32 i = 0; i < sizeof(fKeyStates); i++) {
+			uint8 others = fKeyStates[i];
+			if (i == key >> 3)
+				others &= ~(0x80 >> (key & 7));
+			if (others != 0) {
+				alone = false;
+				break;
+			}
+		}
+		if (alone) {
+			BMessenger deskbar("application/x-vnd.Be-TSKB");
+			if (deskbar.IsValid())
+				deskbar.SendMessage('BeMn');
+		}
+	}
+
 	if (modifiers != fModifiers) {
 		BMessage* message = new(std::nothrow) BMessage(B_MODIFIERS_CHANGED);
 		if (message != NULL) {
@@ -298,6 +319,12 @@ GeckoInputDevice::_HandleKey(const wii_gecko_input_packet& packet)
 	if (rawCharacter != 0)
 		message->AddInt32("raw_char", rawCharacter & 0x7f);
 
-	if (EnqueueMessage(message) != B_OK)
+	status_t status = EnqueueMessage(message);
+	if (status != B_OK)
 		delete message;
+
+	// Bring-up trace, the keyboard twin of the pointer line above.
+	debug_printf("gecko_input: key %" B_PRIx32 " %s char %02x mods %" B_PRIx32
+		" -> %" B_PRIx32 "\n", key, pressed ? "down" : "up", character,
+		modifiers, status);
 }
