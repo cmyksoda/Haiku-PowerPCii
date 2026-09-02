@@ -652,10 +652,17 @@ EventDispatcher::_SendMessage(BMessenger& messenger, BMessage* message,
 	// was momentarily full (a client stalled faulting pages, say); only the
 	// mouse-moved flood is cheap enough to drop outright.
 	bigtime_t timeout = importance > kMouseMovedImportance ? 250000 : 0;
+	bigtime_t started = system_time();
 	status_t status = messenger.SendMessage(message, (BHandler*)NULL, timeout);
+	if (timeout != 0) {
+		// Bring-up trace: whether the grace period is what a click costs.
+		debug_printf("app_server: sent '%.4s' in %" B_PRIdBIGTIME " us: %s\n",
+			(char*)&message->what, system_time() - started, strerror(status));
+	}
 	if (status != B_OK) {
-		printf("EventDispatcher: failed to send message '%.4s' to target: %s\n",
-			(char*)&message->what, strerror(status));
+		// stdout goes nowhere on a headless server; the syslog keeps the drop.
+		debug_printf("EventDispatcher: failed to send message '%.4s' to "
+			"target: %s\n", (char*)&message->what, strerror(status));
 	}
 
 	if (status == B_BAD_PORT_ID) {
@@ -752,11 +759,38 @@ EventDispatcher::_DeliverDragMessage()
 //	#pragma mark - Event loops
 
 
+/*!	Bring-up trace for the input-starved Wii port: a click or key is rare
+	enough to log its queue wait, dispatch time and target to the syslog.
+*/
+static void
+trace_event(const BMessage* event, bigtime_t arrived, EventTarget* target)
+{
+	switch (event->what) {
+		case B_MOUSE_DOWN:
+		case B_MOUSE_UP:
+		case B_KEY_DOWN:
+		case B_KEY_UP:
+		case B_UNMAPPED_KEY_DOWN:
+		case B_UNMAPPED_KEY_UP:
+			break;
+		default:
+			return;
+	}
+
+	bigtime_t when = arrived;
+	event->FindInt64("when", &when);
+	debug_printf("app_server: '%.4s' queued %" B_PRIdBIGTIME " us, dispatched "
+		"%" B_PRIdBIGTIME " us, target %p\n", (char*)&event->what,
+		arrived - when, system_time() - arrived, target);
+}
+
+
 void
 EventDispatcher::_EventLoop()
 {
 	BMessage* event;
 	while (fStream->GetNextEvent(&event)) {
+		bigtime_t arrived = system_time();
 		BAutolock _(this);
 		fLastUpdate = system_time();
 
@@ -975,6 +1009,8 @@ EventDispatcher::_EventLoop()
 					_DeliverDragMessage();
 			}
 		}
+
+		trace_event(event, arrived, current);
 
 		if (fNextLatestMouseMoved == event)
 			fNextLatestMouseMoved = NULL;

@@ -3494,6 +3494,12 @@ BWindow::_SanitizeMessage(BMessage* message, BHandler* target, bool usePreferred
 
 			BView* view = dynamic_cast<BView*>(target);
 
+			// Bring-up trace: the client side of a click, by window and view.
+			if (message->what == B_MOUSE_DOWN) {
+				debug_printf("bwindow: mouse down in \"%s\" view \"%s\"\n",
+					Title(), view != NULL ? view->Name() : "(none)");
+			}
+
 			if (view == NULL || message->what == B_MOUSE_MOVED) {
 				// add local window coordinates, only
 				// for regular mouse moved messages

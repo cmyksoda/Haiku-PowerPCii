@@ -1614,6 +1614,9 @@ BMenu::_Show(bool selectFirstItem, bool keyDown)
 	if (Window() != NULL)
 		return false;
 
+	// Bring-up trace: menus asked to open on the Wii desktop.
+	debug_printf("bmenu: showing \"%s\"\n", Name());
+
 	// See if the supermenu has a cached menuwindow,
 	// and use that one if possible.
 	BMenuWindow* window = NULL;
@@ -1660,6 +1663,7 @@ BMenu::_Show(bool selectFirstItem, bool keyDown)
 
 		// Menu didn't have the time to add its items: aborting...
 		if (fAttachAborted) {
+			debug_printf("bmenu: \"%s\" attach aborted\n", Name());
 			window->DetachMenu();
 			// TODO: Probably not needed, we can just let _hide() quit the
 			// window.

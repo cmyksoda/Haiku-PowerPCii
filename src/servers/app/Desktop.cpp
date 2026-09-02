@@ -374,6 +374,15 @@ MouseFilter::Filter(BMessage* message, EventTarget** _target, int32* _viewToken,
 		fLastClickPoint = where;
 	}
 
+	// Bring-up trace: which window and view a button event resolved to.
+	if (message->what == B_MOUSE_DOWN || message->what == B_MOUSE_UP) {
+		View* view = window != NULL ? window->ViewAt(where) : NULL;
+		debug_printf("desktop: '%.4s' at %d,%d -> \"%s\" view %" B_PRId32
+			" \"%s\"\n", (char*)&message->what, (int)where.x, (int)where.y,
+			window != NULL ? window->Title() : "(none)", viewToken,
+			view != NULL ? view->Name() : "-");
+	}
+
 	if (window == NULL || viewToken == B_NULL_TOKEN) {
 		// mouse is not over a window or over a decorator
 		fDesktop->SetViewUnderMouse(window, B_NULL_TOKEN);
@@ -1377,6 +1386,10 @@ Desktop::ShowWindow(Window* window)
 {
 	if (!window->IsHidden())
 		return;
+
+	// Bring-up trace: a window appearing is the only proof a click landed.
+	debug_printf("app_server: show window \"%s\" at %" B_PRIdBIGTIME " us\n",
+		window->Title(), system_time());
 
 	AutoWriteLocker locker(fWindowLock);
 

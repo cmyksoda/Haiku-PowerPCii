@@ -1981,6 +1981,15 @@ InputServer::_DispatchEvent(BMessage* event)
 			break;
 	}
 
+	// Bring-up trace: how long a click or key sat in this server's queue.
+	if (event->what != B_MOUSE_MOVED && event->what != B_MOUSE_IDLE
+		&& event->what != B_MODIFIERS_CHANGED) {
+		bigtime_t when = system_time();
+		event->FindInt64("when", &when);
+		debug_printf("input_server: '%.4s' queued %" B_PRIdBIGTIME " us\n",
+			(char*)&event->what, system_time() - when);
+	}
+
 	BMessenger reply;
 	BMessage::Private messagePrivate(event);
 	return messagePrivate.SendMessage(fAppServerPort, fAppServerTeam, 0, 0,
