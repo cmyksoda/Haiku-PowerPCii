@@ -557,8 +557,14 @@ BMenuBar::_Track(int32* action, int32 startIndex, bool showMenu)
 	BPoint where;
 	uint32 buttons;
 	if (LockLooper()) {
-		if (startIndex != -1)
+		if (startIndex != -1) {
+			// A programmatic open (showMenu, e.g. the Deskbar menu from the
+			// menu key) has no pointer over the tab, so enter keyboard mode
+			// before the dynamic submenu hit-tests the pointer and aborts.
+			if (showMenu)
+				fState = MENU_STATE_KEY_TO_SUBMENU;
 			_SelectItem(ItemAt(startIndex), true, false);
+		}
 
 		GetMouse(&where, &buttons);
 		UnlockLooper();
