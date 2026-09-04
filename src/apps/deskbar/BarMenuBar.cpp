@@ -139,8 +139,10 @@ TBarMenuBar::TBarMenuBar(BRect frame, const char* name, TBarView* barView)
 		BMemoryIO stream(data, dataSize);
 		icon = BTranslationUtils::GetBitmap(&stream);
 	}
+	bool vectorLeaf = false;
 	if (icon == NULL && (data = AppResSet()->FindResource(B_VECTOR_ICON_TYPE,
 			R_LeafLogoBitmap, &dataSize)) != NULL) {
+		vectorLeaf = true;
 		// seems valid, scale bitmap according to be_bold_font size
 		float width = std::max(63.f, ceilf(63 * be_bold_font->Size() / 12.f));
 		float height = std::max(22.f, ceilf(22 * be_bold_font->Size() / 12.f));
@@ -154,6 +156,7 @@ TBarMenuBar::TBarMenuBar(BRect frame, const char* name, TBarView* barView)
 	}
 
 	fDeskbarMenuItem = new TBarMenuTitle(0.0f, 0.0f, icon, beMenu, fBarView);
+	fDeskbarMenuItem->SetBottomAligned(vectorLeaf);
 	AddItem(fDeskbarMenuItem);
 }
 

@@ -53,6 +53,7 @@ public:
 	virtual ~TBarMenuTitle();
 
 	void SetContentSize(float width, float height);
+	void SetBottomAligned(bool aligned);
 	void Draw();
 
 	status_t Invoke(BMessage* message);
@@ -68,6 +69,7 @@ private:
 	BMenu* fMenu;
 	TBarView* fBarView;
 	status_t fInitStatus;
+	bool fBottomAligned;
 };
 
 

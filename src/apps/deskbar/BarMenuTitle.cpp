@@ -44,7 +44,6 @@ All rights reserved.
 #include "BarApp.h"
 #include "BarView.h"
 #include "BarWindow.h"
-#include "DeskbarMenu.h"
 
 
 TBarMenuTitle::TBarMenuTitle(float width, float height, const BBitmap* icon,
@@ -56,7 +55,8 @@ TBarMenuTitle::TBarMenuTitle(float width, float height, const BBitmap* icon,
 	fIcon(icon),
 	fMenu(menu),
 	fBarView(barView),
-	fInitStatus(B_NO_INIT)
+	fInitStatus(B_NO_INIT),
+	fBottomAligned(false)
 {
 	if (fIcon == NULL || fMenu == NULL || fBarView == NULL)
 		fInitStatus = B_BAD_VALUE;
@@ -83,6 +83,16 @@ TBarMenuTitle::GetContentSize(float* width, float* height)
 {
 	*width = fWidth;
 	*height = fHeight;
+}
+
+
+/*!	The stock leaf is drawn sprouting from the tab's bottom edge, its last
+	rows cut off; a bitmap logo with no margin of its own wants centering.
+*/
+void
+TBarMenuTitle::SetBottomAligned(bool aligned)
+{
+	fBottomAligned = aligned;
 }
 
 
@@ -135,8 +145,7 @@ TBarMenuTitle::DrawContent()
 	float heightOffset = rintf((frame.Height() - iconRect.Height()) / 2);
 
 	// cut-off the leaf
-	bool isLeafMenu = dynamic_cast<TDeskbarMenu*>(fMenu) != NULL;
-	if (isLeafMenu)
+	if (fBottomAligned)
 		iconRect.OffsetBy(widthOffset, frame.Height() - iconRect.Height() + 2);
 	else
 		iconRect.OffsetBy(widthOffset, heightOffset);
