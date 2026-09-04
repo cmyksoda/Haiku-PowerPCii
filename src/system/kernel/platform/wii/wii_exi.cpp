@@ -40,6 +40,8 @@
 #define EXI_SRAM_READ		0x20000100
 
 #define EXI_GECKO_CHANNEL	1
+#define EXI_GECKO_PROBE		0x90000000
+#define EXI_GECKO_ID		0x04700000
 
 #define SRAM_COUNTER_BIAS	0x0c
 
@@ -57,6 +59,8 @@
 static addr_t sEXIBase;
 static uint32 sCounterBias;
 static bool sInitialized;
+static bool sGeckoPresent;
+static bool sGeckoStuck;
 
 static spinlock sGeckoLock = B_SPINLOCK_INITIALIZER;
 
@@ -192,6 +196,27 @@ wii_rtc_set(uint32 seconds)
 // #pragma mark - USB Gecko debug console
 
 
+/*!	The 16 bit ID command 0x9000 is answered with 0x0470 by the adapter itself,
+	whether or not a host is attached; an empty slot reads back nothing.
+*/
+static bool
+usbgecko_probe(void)
+{
+	uint32 data = EXI_GECKO_PROBE;
+
+	*exi_reg(EXI_GECKO_CHANNEL, EXI_CSR)
+		= EXI_CSR_CLK_32MHZ | EXI_CSR_CS(0);
+	eieio();
+
+	bool ok = exi_imm(EXI_GECKO_CHANNEL, &data, 2, EXI_CR_READWRITE);
+
+	*exi_reg(EXI_GECKO_CHANNEL, EXI_CSR) = 0;
+	eieio();
+
+	return ok && (data & EXI_GECKO_ID) == EXI_GECKO_ID;
+}
+
+
 /*!	TX is the 16 bit command 0xB000 with the byte in bits 4-11; bit 26 of the
 	reply is set once the adapter's FIFO has accepted the byte.
 */
@@ -308,7 +333,7 @@ gecko_demux(char c, wii_gecko_input_packet* _packet)
 bool
 wii_gecko_input_poll(wii_gecko_input_packet* packet)
 {
-	if (sEXIBase == 0)
+	if (!sGeckoPresent)
 		return false;
 
 	for (int i = 0; i < GECKO_CONSOLE_RING_SIZE; i++) {
@@ -340,6 +365,10 @@ wii_serial_debug_init(void)
 	if (sEXIBase == 0)
 		sEXIBase = 0xc0000000 + WII_HOLLYWOOD_PHYS_BASE + WII_HW_EXI;
 
+	// Without an adapter every byte would burn its full retry budget with
+	// interrupts off, so an empty slot B silences the console outright.
+	sGeckoPresent = usbgecko_probe();
+
 	return B_OK;
 }
 
@@ -347,7 +376,7 @@ wii_serial_debug_init(void)
 void
 wii_serial_debug_put_char(char c)
 {
-	if (sEXIBase == 0)
+	if (!sGeckoPresent)
 		return;
 
 	// The input driver polls the same channel from an ordinary thread; inside
@@ -359,11 +388,13 @@ wii_serial_debug_put_char(char c)
 		acquire_spinlock(&sGeckoLock);
 	}
 
-	// Bounded retry: the adapter's FIFO drains at USB pace mid-burst.
-	for (int i = 0; i < 10000; i++) {
-		if (usbgecko_send_byte(c))
-			break;
-	}
+	// Bounded retry: the adapter's FIFO drains at USB pace mid-burst, but with
+	// nobody reading on the host it never drains, so stay brief until it does.
+	int retries = sGeckoStuck ? 100 : 10000;
+	bool sent = false;
+	for (int i = 0; i < retries && !sent; i++)
+		sent = usbgecko_send_byte(c);
+	sGeckoStuck = !sent;
 
 	if (locked) {
 		release_spinlock(&sGeckoLock);
@@ -375,7 +406,7 @@ wii_serial_debug_put_char(char c)
 char
 wii_serial_debug_get_char(void)
 {
-	if (sEXIBase == 0)
+	if (!sGeckoPresent)
 		return 0;
 
 	// Debugger context only, so no lock: input frames arriving here are
