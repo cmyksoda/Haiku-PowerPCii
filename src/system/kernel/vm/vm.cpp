@@ -5279,8 +5279,12 @@ lock_memory_etc(team_id team, void* address, size_t numBytes, uint32 flags)
 				cacheChainLocker.Unlock();
 				range->~VMAreaWiredRange();
 				free_etc(range, mallocFlags);
-			} else
+			} else {
+				// Only the pages up to here are wired; trim the range so the
+				// unwind below finds it under the size it will ask for.
+				range->size = nextAddress - areaStart;
 				cacheChainLocker.Unlock();
+			}
 
 			break;
 		}
